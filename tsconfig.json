@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "types": ["node", "jest"]
+  },
+  "include": ["src/**/*", "database/**/*"],
+  "exclude": ["node_modules", "dist", "test/e2e"]
+}

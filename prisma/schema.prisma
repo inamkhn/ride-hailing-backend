@@ -1,0 +1,424 @@
+// Ride-Hailing Platform — Prisma schema
+// All 16 tables from database-schema.md (§1–§2a).
+// Docs: database-schema.md, monolith-features.md §2
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// role stored as lowercase values to match JWT `role` claims + require_role() strings.
+enum Role {
+  rider
+  driver
+  admin
+
+  @@map("user_role")
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+
+  @@map("driver_verification_status")
+}
+
+enum TripState {
+  REQUESTED
+  MATCHED
+  DRIVER_EN_ROUTE
+  ARRIVED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  EXPIRED
+  DISPUTED
+
+  @@map("trip_state")
+}
+
+enum CancelledBy {
+  rider
+  driver
+  system
+
+  @@map("cancelled_by")
+}
+
+enum HoldReason {
+  dispute
+  fraud
+
+  @@map("hold_reason")
+}
+
+enum HoldResolution {
+  released
+  refunded
+
+  @@map("hold_resolution")
+}
+
+enum LedgerAccount {
+  platform_in_transit         @map("platform:in_transit")
+  platform_revenue            @map("platform:revenue")
+  platform_pending_review     @map("platform:pending_review")
+  driver_payable              @map("driver:payable")
+  driver_held                 @map("driver:held")
+  external_processor_clearing @map("external:processor_clearing")
+
+  @@map("ledger_account")
+}
+
+enum FraudRule {
+  gps_speed
+  route_deviation
+  repeat_pairing
+
+  @@map("fraud_rule")
+}
+
+enum ProviderTransactionType {
+  charge
+  refund
+
+  @@map("provider_transaction_type")
+}
+
+enum ProviderTransactionStatus {
+  pending
+  succeeded
+  failed
+
+  @@map("provider_transaction_status")
+}
+
+enum PayoutBatchStatus {
+  pending
+  sent
+  paid
+  failed
+
+  @@map("payout_batch_status")
+}
+
+/// Unified identity for every person (rider | driver | admin).
+/// Supersedes the original `riders` + `admin_users` tables (identity consolidation).
+/// Credential rules (enforced at the application layer, not as DB constraints):
+///   role in (rider, driver) => phone_number set, email/password_hash null
+///   role = admin            => email + password_hash set, phone_number null
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  phoneNumber  String?  @unique @map("phone_number") // E.164; identity key for rider/driver OTP
+  email        String?  @unique // login identifier for admin rows
+  passwordHash String?  @map("password_hash") // admin only, hashed — never plaintext
+  fullName     String?  @map("full_name") // optional at signup, filled via Profile
+  role         Role
+  isActive     Boolean  @default(true) @map("is_active") // deactivate without deleting audit history
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // 1:1 driver profile extension (drivers.user_id -> users.id)
+  driverProfile   Driver?
+  // 1:1 onboarding record, created in the same txn as a driver's users row (driver_verifications.driver_id -> users.id)
+  verification    DriverVerification?
+  riderTrips      Trip[]              @relation("riderTrips")
+  driverTrips     Trip[]              @relation("driverTrips")
+  locationHistory LocationHistory[]
+  paymentMethods  PaymentMethod[]
+  payoutBatches   PayoutBatch[]
+  auditLogs       AdminAuditLog[]
+
+  @@index([role])
+  @@map("users")
+}
+
+/// Driver profile extension, 1:1 with the `users` row where role="driver".
+/// Identity (phone, name) lives on `users`. Single-vehicle assumption baked in.
+model Driver {
+  id                   String   @id @default(uuid()) @db.Uuid
+  userId               String   @unique @map("user_id") @db.Uuid
+  vehicleMake          String?  @map("vehicle_make")
+  vehicleModel         String?  @map("vehicle_model")
+  vehiclePlate         String?  @map("vehicle_plate")
+  payoutDestinationRef String?  @map("payout_destination_ref") // opaque processor token, never a raw bank number
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("drivers")
+}
+
+/// Manual-review onboarding status. One row per driver, starts PENDING.
+/// `status = APPROVED` is what Dispatch checks before a driver can go AVAILABLE.
+model DriverVerification {
+  id                     String             @id @default(uuid()) @db.Uuid
+  driverId               String             @unique @map("driver_id") @db.Uuid
+  licenseDocumentUrl     String?            @map("license_document_url")
+  vehicleRegistrationUrl String?            @map("vehicle_registration_url")
+  status                 VerificationStatus @default(PENDING)
+  reviewedByAdminId      String?            @map("reviewed_by_admin_id") @db.Uuid // logical FK to users(id, role=admin), from admin JWT
+  reviewedAt             DateTime?          @map("reviewed_at")
+  createdAt              DateTime           @default(now()) @map("created_at")
+
+  driver User @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("driver_verifications")
+}
+
+/// Trip lifecycle state machine — the central table most other modules reference.
+/// Allowed transitions + optimistic concurrency (`UPDATE ... WHERE state = :expected`)
+/// are enforced by the Trip module (monolith-features.md §3 Trip Module).
+model Trip {
+  id                   String       @id @default(uuid()) @db.Uuid
+  riderId              String       @map("rider_id") @db.Uuid
+  driverId             String?      @map("driver_id") @db.Uuid // null until matched
+  state                TripState    @default(REQUESTED)
+  pickupH3Cell         String?      @map("pickup_h3_cell") // H3 res 8 at matching time
+  dropoffH3Cell        String?      @map("dropoff_h3_cell")
+  estimatedDistanceM   Int?         @map("estimated_distance_m") // from Routing GetRouteEstimate
+  estimatedDurationS   Int?         @map("estimated_duration_s")
+  fareAmountMinor      Int?         @map("fare_amount_minor") // integer minor units — no floats
+  cancelledBy          CancelledBy? @map("cancelled_by")
+  cancellationFeeMinor Int?         @map("cancellation_fee_minor") // open decision: fee rules undefined
+  createdAt            DateTime     @default(now()) @map("created_at")
+  updatedAt            DateTime     @updatedAt @map("updated_at")
+
+  rider                User                  @relation("riderTrips", fields: [riderId], references: [id])
+  driver               User?                 @relation("driverTrips", fields: [driverId], references: [id])
+  idempotencyKeys      TripIdempotencyKey[]
+  ledgerEntries        LedgerEntry[]
+  payoutHolds          PayoutHold[]
+  fraudFlags           FraudFlag[]
+  providerTransactions ProviderTransaction[]
+  payoutBatchItem      PayoutBatchItem?
+
+  @@index([state])
+  @@index([riderId])
+  @@index([driverId])
+  // Schema doc §5: Timeout Worker query `WHERE state = 'REQUESTED' AND created_at < ...`
+  @@index([state, createdAt])
+  @@map("trips")
+}
+
+/// Makes POST /trips/{id}/transition safe to retry — duplicate key replays the
+/// original response instead of re-executing the transition.
+/// Eventually needs a retention policy (purge keys older than N days).
+model TripIdempotencyKey {
+  key              String   @id // client-supplied idempotency key
+  tripId           String   @map("trip_id") @db.Uuid
+  responseSnapshot Json?    @map("response_snapshot") // replayed verbatim on duplicate request
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  trip Trip @relation(fields: [tripId], references: [id])
+
+  @@index([tripId])
+  @@map("trip_idempotency_keys")
+}
+
+/// Double-entry ledger — APPEND-ONLY: no UPDATE/DELETE path in the Ledger service;
+/// a correction is always a new balancing entry. Invariant (application layer +
+/// reconciliation job): SUM(amount_minor) per transaction_id must equal zero.
+model LedgerEntry {
+  id            String        @id @default(uuid()) @db.Uuid
+  transactionId String        @map("transaction_id") @db.Uuid // groups the balanced legs of one logical transaction
+  tripId        String        @map("trip_id") @db.Uuid
+  account       LedgerAccount
+  amountMinor   BigInt        @map("amount_minor") // positive = credit, negative = debit; integer minor units
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  trip Trip @relation(fields: [tripId], references: [id])
+
+  @@index([transactionId])
+  @@index([tripId])
+  @@index([account])
+  @@map("ledger_entries")
+}
+
+/// Driver payout held back from settlement — dispute (driver share, `driver:held`)
+/// or fraud (full fare, `platform:pending_review`). Resolved via Backoffice.
+/// NOTE: schema doc requires a PARTIAL unique index `(trip_id, reason) WHERE resolved = false`
+/// — Prisma cannot express this; add it as raw SQL in the migration.
+model PayoutHold {
+  id                String          @id @default(uuid()) @db.Uuid
+  tripId            String          @map("trip_id") @db.Uuid
+  reason            HoldReason
+  heldAmountMinor   BigInt          @map("held_amount_minor") // driver share (dispute) or full fare (fraud)
+  note              String?
+  resolved          Boolean         @default(false)
+  resolution        HoldResolution?
+  resolvedByAdminId String?         @map("resolved_by_admin_id") @db.Uuid // logical FK to users(id, role=admin), from JWT
+  resolvedAt        DateTime?       @map("resolved_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+
+  trip Trip @relation(fields: [tripId], references: [id])
+
+  @@index([tripId])
+  @@map("payout_holds")
+}
+
+/// One row per rule violation — a single trip can have multiple flags.
+/// A flag routes settlement to `platform:pending_review` and creates a fraud PayoutHold;
+/// it never changes trip state.
+model FraudFlag {
+  id            String    @id @default(uuid()) @db.Uuid
+  tripId        String    @map("trip_id") @db.Uuid
+  ruleTriggered FraudRule @map("rule_triggered")
+  details       String? // free-form context for the Backoffice reviewer (e.g. computed speed vs. threshold)
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  trip Trip @relation(fields: [tripId], references: [id])
+
+  @@index([tripId])
+  // Schema doc §5 — Backoffice "has this rule already fired for this trip?"
+  // (this composite also serves trip_id-only lookups via its leading column)
+  @@index([tripId, ruleTriggered])
+  @@map("fraud_flags")
+}
+
+/// Durable GPS ping history — written ASYNC by the location-history worker (batch insert),
+/// never on the request critical path. Idempotent by (driver_id, recorded_at).
+/// Grows fast (~2.4k–7.2k rows/driver/day) — partition by recorded_at when volume justifies.
+model LocationHistory {
+  id         String   @id @default(uuid()) @db.Uuid
+  driverId   String   @map("driver_id") @db.Uuid
+  lat        Float
+  lng        Float
+  recordedAt DateTime @map("recorded_at") // client timestamp — when the ping happened
+  createdAt  DateTime @default(now()) @map("created_at") // row write time (lags, since async)
+
+  driver User @relation(fields: [driverId], references: [id])
+
+  @@unique([driverId, recordedAt]) // idempotency guard against out-of-order/duplicate pings
+  @@map("location_history")
+}
+
+/// Rider's saved payment methods — tokenized by the processor, never raw card data.
+/// Exact shape depends on the open payment-processor decision; processor_token/method_type
+/// are intentionally generic.
+model PaymentMethod {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  processorToken String   @map("processor_token") // e.g. a Stripe PaymentMethod ID
+  methodType     String   @map("method_type") // "card" | "wallet" | processor-specific
+  displayLabel   String?  @map("display_label") // e.g. "Visa •••• 4242", sourced from the processor
+  isDefault      Boolean  @default(false) @map("is_default")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("payment_methods")
+}
+
+/// One row per processor call (charge/refund attempt) — the reconciliation bridge between
+/// "what we told the processor to do" and "what our books say happened". Kept separate
+/// from LedgerEntry so a processor migration only touches this table.
+/// external:processor_clearing net balance must reconcile against succeeded rows here.
+model ProviderTransaction {
+  id                  String                    @id @default(uuid()) @db.Uuid
+  tripId              String                    @map("trip_id") @db.Uuid
+  ledgerTransactionId String?                   @map("ledger_transaction_id") @db.Uuid // groups into ledger_entries once written
+  providerReference   String                    @map("provider_reference") // processor's own charge/refund ID
+  type                ProviderTransactionType
+  amountMinor         BigInt                    @map("amount_minor")
+  status              ProviderTransactionStatus // mirrors the processor's status vocabulary
+  rawResponseSnapshot Json?                     @map("raw_response_snapshot") // kept for debugging without re-calling the API
+  createdAt           DateTime                  @default(now()) @map("created_at")
+
+  trip Trip @relation(fields: [tripId], references: [id])
+
+  @@index([tripId])
+  @@index([ledgerTransactionId])
+  @@index([providerReference])
+  @@map("provider_transactions")
+}
+
+/// Driver payout runs sent to the processor — the Settlement Worker's unit of work.
+/// Shaped for batched payouts; per-trip payout = single-item batches (open decision).
+model PayoutBatch {
+  id                      String            @id @default(uuid()) @db.Uuid
+  driverId                String            @map("driver_id") @db.Uuid
+  providerPayoutReference String?           @map("provider_payout_reference") // set once sent to the processor
+  totalAmountMinor        BigInt            @map("total_amount_minor") // sum of this batch's payout_batch_items
+  status                  PayoutBatchStatus @default(pending)
+  createdAt               DateTime          @default(now()) @map("created_at")
+  paidAt                  DateTime?         @map("paid_at")
+
+  driver User              @relation(fields: [driverId], references: [id])
+  items  PayoutBatchItem[]
+
+  @@index([driverId])
+  @@index([providerPayoutReference])
+  @@map("payout_batches")
+}
+
+/// One row per trip payout inside a batch — makes "was trip X paid, in which batch"
+/// queryable. The UNIQUE trip_id is the guard against paying a trip's share twice.
+model PayoutBatchItem {
+  id          String @id @default(uuid()) @db.Uuid
+  batchId     String @map("batch_id") @db.Uuid
+  tripId      String @unique @map("trip_id") @db.Uuid
+  amountMinor BigInt @map("amount_minor") // the driver share (D) for this trip
+
+  batch PayoutBatch @relation(fields: [batchId], references: [id])
+  trip  Trip        @relation(fields: [tripId], references: [id])
+
+  @@index([batchId])
+  @@map("payout_batch_items")
+}
+
+/// Inbound processor webhook idempotency log — LAUNCH-BLOCKING (schema doc §7.1):
+/// the unique provider_event_id is what turns a duplicate delivery into a no-op
+/// instead of a double-charge / double-payout.
+model WebhookEvent {
+  id              String    @id @default(uuid()) @db.Uuid
+  providerEventId String    @unique @map("provider_event_id") // the processor's own event ID
+  eventType       String    @map("event_type") // e.g. "charge.succeeded", "payout.failed"
+  payload         Json // full raw webhook body, kept for debugging
+  processedAt     DateTime? @map("processed_at") // null until handled — retry re-attempts null rows
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@map("webhook_events")
+}
+
+/// Every Backoffice write produces a row here, in the SAME transaction as the action
+/// — turns force-transition/refund/hold-resolution authority into something reviewable.
+/// Acting admin comes from the JWT (`sub`), never a request-body field.
+model AdminAuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  adminId    String   @map("admin_id") @db.Uuid
+  action     String // "force_transition" | "refund" | "resolve_hold" | "approve_onboarding" | ...
+  targetType String   @map("target_type") // "trip" | "driver_verification" | "payout_hold"
+  targetId   String   @map("target_id") @db.Uuid
+  reason     String? // admin-supplied justification — must land here, not be discarded
+  metadata   Json? // action-specific detail (e.g. old state → new state)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  admin User @relation(fields: [adminId], references: [id])
+
+  @@index([adminId])
+  @@index([targetType, targetId])
+  @@map("admin_audit_log")
+}
+
+/// Transactional-outbox rows — a writer inserts in the SAME transaction as its business
+/// write; the relay (src/workers/outbox-relay.worker.ts) publishes and stamps published_at,
+/// so a DB commit and its downstream side effect can't diverge on a crash.
+/// Multi-replica relay: use SELECT ... FOR UPDATE SKIP LOCKED (see schema doc §2a).
+model OutboxEvent {
+  id          String    @id @default(uuid()) @db.Uuid
+  eventType   String    @map("event_type") // e.g. "trip.completed", "notification.push"
+  payload     Json // body replayed onto the event bus when published
+  publishedAt DateTime? @map("published_at") // null until relayed; retry re-attempts null rows
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([eventType])
+  @@index([publishedAt])
+  @@map("outbox_events")
+}
