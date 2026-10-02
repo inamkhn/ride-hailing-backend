@@ -5,6 +5,6 @@
     "baseUrl": "./",
     "types": ["node", "jest"]
   },
-  "include": ["src/**/*", "database/**/*"],
+  "include": ["src/**/*", "database/**/*", "prisma/**/*.ts"],
   "exclude": ["node_modules", "dist", "test/e2e"]
 }
