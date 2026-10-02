@@ -1,0 +1,41 @@
+# Local development infrastructure for the ride-hailing monolith.
+# Kafka is intentionally NOT included: the monolith uses an in-process event
+# emitter + transactional outbox (monolith-features.md §5), not Kafka.
+# Start with: docker compose up -d   (from backend/)
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4-alpine # PostgreSQL 16 + PostGIS 3.4
+    container_name: rh-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ride_hailing
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-postgis.sql:/docker-entrypoint-initdb.d/10-init-postgis.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ride_hailing"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: rh-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
