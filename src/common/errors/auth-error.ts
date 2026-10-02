@@ -67,4 +67,45 @@ export class AuthError extends Error {
   ): AuthError {
     return new AuthError(AuthErrorCode.OTP_PROVIDER_UNAVAILABLE, message);
   }
+
+  // --- Onboarding / document-upload failures (onboarding-module.md) ---
+  static unsupportedFile(message = 'Unsupported file type'): AuthError {
+    return new AuthError(AuthErrorCode.UNSUPPORTED_FILE_TYPE, message);
+  }
+  static fileTooLarge(message = 'File exceeds the maximum allowed size'): AuthError {
+    return new AuthError(AuthErrorCode.FILE_TOO_LARGE, message);
+  }
+  static uploadNotFound(message = 'Upload not found, request a new upload URL'): AuthError {
+    return new AuthError(AuthErrorCode.UPLOAD_NOT_FOUND, message);
+  }
+  static fileMismatch(message = 'Uploaded file does not match the declared type or size'): AuthError {
+    return new AuthError(AuthErrorCode.FILE_MISMATCH, message);
+  }
+  static notYourUpload(message = 'This upload does not belong to you'): AuthError {
+    return new AuthError(AuthErrorCode.NOT_YOUR_UPLOAD, message);
+  }
+  static incompleteSubmission(missing: string[]): AuthError {
+    return new AuthError(
+      AuthErrorCode.INCOMPLETE_SUBMISSION,
+      `Submission incomplete. Missing: ${missing.join(', ')}`,
+    );
+  }
+  static alreadySubmitted(message = 'Already submitted, awaiting review'): AuthError {
+    return new AuthError(AuthErrorCode.ALREADY_SUBMITTED, message);
+  }
+  static alreadyApproved(message = 'Driver is already approved'): AuthError {
+    return new AuthError(AuthErrorCode.ALREADY_APPROVED, message);
+  }
+  static alreadyApprovedLocked(message = 'Editing is locked once approved'): AuthError {
+    return new AuthError(AuthErrorCode.ALREADY_APPROVED_LOCKED, message);
+  }
+  static staleSubmission(message = 'Submission number no longer matches; review the latest set'): AuthError {
+    return new AuthError(AuthErrorCode.STALE_SUBMISSION, message);
+  }
+  static notReviewable(message = 'Not in a reviewable state'): AuthError {
+    return new AuthError(AuthErrorCode.NOT_REVIEWABLE, message);
+  }
+  static missingExpiry(message = 'Expiry date is required for the license and registration'): AuthError {
+    return new AuthError(AuthErrorCode.MISSING_EXPIRY, message);
+  }
 }

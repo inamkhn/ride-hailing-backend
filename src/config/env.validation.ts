@@ -97,6 +97,51 @@ export class EnvVars {
   @IsString()
   @IsOptional()
   TOTP_ISSUER = 'RideHailing Backoffice';
+
+  // --- Object storage for driver documents (onboarding-module.md §9) ---
+  // S3-compatible; local dev points at MinIO (docker-compose).
+  @IsString()
+  @IsOptional()
+  S3_ENDPOINT = 'http://localhost:9000';
+
+  @IsString()
+  @IsOptional()
+  S3_REGION = 'us-east-1';
+
+  @IsString()
+  @IsOptional()
+  S3_BUCKET = 'ride-hailing-documents';
+
+  @IsString()
+  @IsOptional()
+  S3_ACCESS_KEY_ID = 'minioadmin';
+
+  @IsString()
+  @IsOptional()
+  S3_SECRET_ACCESS_KEY = 'minioadmin';
+
+  /** MinIO needs path-style addressing; most cloud S3 uses virtual-host (false). */
+  @IsIn(['true', 'false'])
+  @IsOptional()
+  S3_FORCE_PATH_STYLE: 'true' | 'false' = 'true';
+
+  /** Presigned PUT lifetime (seconds) — short, §5.2 says ~5-10 min. */
+  @IsInt()
+  @Min(60)
+  @IsOptional()
+  DOCUMENT_UPLOAD_URL_TTL_SECONDS = 600;
+
+  /** Presigned GET (view) lifetime (seconds) — ~5 min, §6.2. */
+  @IsInt()
+  @Min(30)
+  @IsOptional()
+  DOCUMENT_VIEW_URL_TTL_SECONDS = 300;
+
+  /** Max accepted document size in bytes (default 10 MB, §9). */
+  @IsInt()
+  @Min(1)
+  @IsOptional()
+  DOCUMENT_MAX_SIZE_BYTES = 10485760;
 }
 
 export function validateEnv(config: Record<string, unknown>): Record<string, unknown> {

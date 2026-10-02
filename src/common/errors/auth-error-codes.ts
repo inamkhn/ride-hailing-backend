@@ -23,6 +23,21 @@ export enum AuthErrorCode {
   RATE_LIMITED = 'rate_limited',
 
   OTP_PROVIDER_UNAVAILABLE = 'otp_provider_unavailable',
+
+  // Onboarding / document-upload codes (onboarding-module.md §5, §6, §7).
+  UNSUPPORTED_FILE_TYPE = 'unsupported_file_type',
+  FILE_TOO_LARGE = 'file_too_large',
+  UPLOAD_NOT_FOUND = 'upload_not_found',
+  FILE_MISMATCH = 'file_mismatch',
+  NOT_YOUR_UPLOAD = 'not_your_upload',
+  INCOMPLETE_SUBMISSION = 'incomplete_submission',
+  ALREADY_SUBMITTED = 'already_submitted',
+  ALREADY_APPROVED = 'already_approved',
+  ALREADY_APPROVED_LOCKED = 'already_approved_locked',
+  STALE_SUBMISSION = 'stale_submission',
+  NOT_REVIEWABLE = 'not_reviewable',
+  MISSING_EXPIRY = 'missing_expiry',
+  DOCUMENT_EXPIRED = 'document_expired',
 }
 
 /** Code → HTTP status, per §8.6. */
@@ -40,4 +55,18 @@ export const AUTH_ERROR_STATUS: Record<AuthErrorCode, HttpStatus> = {
   [AuthErrorCode.ROLE_MISMATCH]: HttpStatus.CONFLICT,
   [AuthErrorCode.RATE_LIMITED]: HttpStatus.TOO_MANY_REQUESTS,
   [AuthErrorCode.OTP_PROVIDER_UNAVAILABLE]: HttpStatus.SERVICE_UNAVAILABLE,
+
+  [AuthErrorCode.UNSUPPORTED_FILE_TYPE]: HttpStatus.BAD_REQUEST,
+  [AuthErrorCode.FILE_TOO_LARGE]: HttpStatus.BAD_REQUEST,
+  [AuthErrorCode.UPLOAD_NOT_FOUND]: HttpStatus.BAD_REQUEST,
+  [AuthErrorCode.FILE_MISMATCH]: HttpStatus.BAD_REQUEST,
+  [AuthErrorCode.MISSING_EXPIRY]: HttpStatus.BAD_REQUEST,
+  [AuthErrorCode.NOT_YOUR_UPLOAD]: HttpStatus.FORBIDDEN,
+  [AuthErrorCode.INCOMPLETE_SUBMISSION]: HttpStatus.CONFLICT,
+  [AuthErrorCode.ALREADY_SUBMITTED]: HttpStatus.CONFLICT,
+  [AuthErrorCode.ALREADY_APPROVED]: HttpStatus.CONFLICT,
+  [AuthErrorCode.ALREADY_APPROVED_LOCKED]: HttpStatus.CONFLICT,
+  [AuthErrorCode.STALE_SUBMISSION]: HttpStatus.CONFLICT,
+  [AuthErrorCode.NOT_REVIEWABLE]: HttpStatus.CONFLICT,
+  [AuthErrorCode.DOCUMENT_EXPIRED]: HttpStatus.CONFLICT,
 };

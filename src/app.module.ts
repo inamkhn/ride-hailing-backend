@@ -1,12 +1,16 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 
 import { PrismaModule } from './common/prisma/prisma.module';
 import { validateEnv } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
+import { OnboardingModule } from './modules/onboarding/onboarding.module';
+import { ProfileModule } from './modules/profile/profile.module';
 
 // Root of the modular monolith. Feature modules (auth, onboarding, profile, trip, ...)
 // are added to `imports` as they are implemented.
@@ -36,6 +40,14 @@ import { AuthModule } from './modules/auth/auth.module';
       }),
     }),
     AuthModule,
+    OnboardingModule,
+    ProfileModule,
+    // In-process domain events (EventBus) — powers driver.verification.changed and
+    // profile.vehicle.changed reactions. Kafka relay is a later concern; the transactional
+    // outbox already durably records every event.
+    EventEmitterModule.forRoot({ wildcard: true, delimiter: '.' }),
+    // Cron scheduler for the document-expiry auto-revoke worker.
+    ScheduleModule.forRoot(),
   ],
   controllers: [],
   providers: [

@@ -28,6 +28,16 @@ enum VerificationStatus {
   @@map("driver_verification_status")
 }
 
+/// Driver document categories (onboarding-module.md §4.2, §4.3). Background check is
+/// modeled as an uploaded document (Option A), not a separate status field.
+enum DocumentType {
+  LICENSE
+  VEHICLE_REGISTRATION
+  BACKGROUND_CHECK
+
+  @@map("document_type")
+}
+
 enum TripState {
   REQUESTED
   MATCHED
@@ -166,19 +176,42 @@ model Driver {
 /// Manual-review onboarding status. One row per driver, starts PENDING.
 /// `status = APPROVED` is what Dispatch checks before a driver can go AVAILABLE.
 model DriverVerification {
-  id                     String             @id @default(uuid()) @db.Uuid
-  driverId               String             @unique @map("driver_id") @db.Uuid
-  licenseDocumentUrl     String?            @map("license_document_url")
-  vehicleRegistrationUrl String?            @map("vehicle_registration_url")
-  status                 VerificationStatus @default(PENDING)
-  reviewedByAdminId      String?            @map("reviewed_by_admin_id") @db.Uuid // logical FK to users(id, role=admin), from admin JWT
-  reviewedAt             DateTime?          @map("reviewed_at")
-  createdAt              DateTime           @default(now()) @map("created_at")
+  id               String             @id @default(uuid()) @db.Uuid
+  driverId         String             @unique @map("driver_id") @db.Uuid
+  status           VerificationStatus @default(PENDING)
+  submittedAt      DateTime?          @map("submitted_at") // set on submit; queue = PENDING AND submitted_at IS NOT NULL
+  submissionNumber Int                @default(0) @map("submission_number") // incremented per submit; admin decisions must quote it
+  rejectionReasonCode String?         @map("rejection_reason_code") // §6.4 codes; driver-visible guidance
+  rejectionMessage    String?         @map("rejection_message")
+  reviewedByAdminId  String?          @map("reviewed_by_admin_id") @db.Uuid // logical FK to users(id, role=admin), from admin JWT
+  reviewedAt         DateTime?        @map("reviewed_at")
+  createdAt          DateTime         @default(now()) @map("created_at")
 
-  driver User @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  driver    User             @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  documents DriverDocument[]
 
   @@index([status])
   @@map("driver_verifications")
+}
+
+/// One row per document upload, never overwritten — full history is preserved
+/// (onboarding-module.md §4.2). `storage_key` points at the private object-storage
+/// object; there is never a public/permanent URL stored here.
+model DriverDocument {
+  id             String       @id @default(uuid()) @db.Uuid
+  verificationId String       @map("verification_id") @db.Uuid
+  type           DocumentType
+  storageKey     String       @map("storage_key") // object-storage key, not a URL
+  contentType    String       @map("content_type") // re-verified server-side after upload
+  sizeBytes      Int          @map("size_bytes") // re-verified server-side after upload
+  uploadedAt     DateTime     @default(now()) @map("uploaded_at")
+  submissionNumber Int?       @map("submission_number") // null while draft; stamped with the verification's number on submit
+  expiresOn      DateTime?    @map("expires_on") // entered by admin at approval; drives expiry auto-revoke
+
+  verification DriverVerification @relation(fields: [verificationId], references: [id], onDelete: Cascade)
+
+  @@index([verificationId, type, uploadedAt])
+  @@map("driver_documents")
 }
 
 /// Rotating refresh tokens (auth-api-spec.md §6.2 Option B). One row per active token
