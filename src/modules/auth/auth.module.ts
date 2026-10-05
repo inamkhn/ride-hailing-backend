@@ -2,9 +2,8 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 
+import { CommonModule } from '../../common/common.module';
 import { RolesGuard } from '../../common/guards/require-role.guard';
-import { RateLimitService } from '../../common/rate-limiting/rate-limit.service';
-import { redisClientProvider } from '../../config/redis.config';
 
 import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
@@ -28,6 +27,9 @@ import { TwilioVerifyService } from './twilio-verify.service';
  */
 @Module({
   imports: [
+    // Shared Redis connection + identity-keyed RateLimitService live in CommonModule;
+    // importing it (not re-providing) keeps a single Redis client across the app.
+    CommonModule,
     // Access-token signing/verification. Secret + kid come from validated env (§6.1);
     // per-role TTL is applied at sign time in TokenService, so no global expiresIn here.
     JwtModule.registerAsync({
@@ -45,8 +47,6 @@ import { TwilioVerifyService } from './twilio-verify.service';
     AdminAuthController,
   ],
   providers: [
-    redisClientProvider,
-    RateLimitService,
     TokenService,
     RefreshTokenService,
     TwilioVerifyService,

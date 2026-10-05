@@ -4,6 +4,7 @@ import { DocumentType, DriverDocument, Prisma, VerificationStatus } from '@prism
 import { AuthError } from '../../common/errors/auth-error';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { OutboxService } from '../../common/outbox/outbox.service';
+import { RateLimitService } from '../../common/rate-limiting/rate-limit.service';
 import {
   DRIVER_VERIFICATION_CHANGED,
   EventBus,
@@ -29,6 +30,14 @@ type VerificationWithDocs = Prisma.DriverVerificationGetPayload<{
 }>;
 
 /**
+ * Per-driver rate limits (onboarding-module.md §10, "starting values, tunable").
+ * Identity-keyed via the shared Redis RateLimitService — the global ThrottlerGuard is
+ * IP-based and can't express a per-driver budget. Enforced on the write endpoints.
+ */
+const UPLOAD_URL_LIMIT = { prefix: 'ob:upload-url', limit: 20, windowSeconds: 3600 }; // 20 / hour / driver
+const SUBMIT_LIMIT = { prefix: 'ob:submit', limit: 5, windowSeconds: 86400 }; // 5 / day / driver
+
+/**
  * Driver document review & approval (onboarding-module.md). Owns the verification
  * lifecycle, the upload/submit flow, and the admin decisions. Backoffice routes are
  * thin callers into here. Identity always comes from the caller (JWT sub), never a
@@ -44,7 +53,17 @@ export class OnboardingService {
     private readonly storage: StorageService,
     private readonly outbox: OutboxService,
     private readonly events: EventBus,
+    private readonly rateLimiter: RateLimitService,
   ) {}
+
+  /**
+   * Fixed-window per-driver budget (§10). Throws 429 with a retry hint when exceeded.
+   * Applied before any state/storage work so a throttled call is cheap.
+   */
+  private async assertWithinLimit(prefix: string, limit: number, windowSeconds: number, driverId: string): Promise<void> {
+    const res = await this.rateLimiter.consume(`${prefix}:${driverId}`, limit, windowSeconds);
+    if (!res.allowed) throw AuthError.rateLimited(res.retryAfterSeconds);
+  }
 
   // ---------------------------------------------------------------- capability
 
@@ -135,6 +154,7 @@ export class OnboardingService {
     contentType: string,
     sizeBytes: number,
   ): Promise<UploadUrlResponse> {
+    await this.assertWithinLimit(UPLOAD_URL_LIMIT.prefix, UPLOAD_URL_LIMIT.limit, UPLOAD_URL_LIMIT.windowSeconds, driverId);
     const v = await this.getOrCreate(driverId);
     this.assertEditable(v);
 
@@ -197,6 +217,7 @@ export class OnboardingService {
    * docs under a new submission_number, move PENDING(draft)/REJECTED -> PENDING(queued).
    */
   async submit(driverId: string): Promise<StatusView> {
+    await this.assertWithinLimit(SUBMIT_LIMIT.prefix, SUBMIT_LIMIT.limit, SUBMIT_LIMIT.windowSeconds, driverId);
     const v = await this.getOrCreate(driverId);
 
     if (v.status === VerificationStatus.APPROVED) throw AuthError.alreadyApproved();
@@ -221,10 +242,13 @@ export class OnboardingService {
           rejectionMessage: null,
         },
       });
-      // Stamp the current draft set (submissionNumber null) so the admin reviews a
-      // frozen snapshot; edits after this point are blocked until a decision (§5.4).
+      // Stamp the CURRENT document set (latest per type) with the new number so the
+      // admin reviews a frozen snapshot. Includes docs carried over unchanged from a
+      // prior submission in a partial resubmit — approve() later matches expiry by
+      // this number, so every current doc of the reviewed set must carry it (§5.4/§6.3).
+      const currentIds = [...current.values()].map((d) => d.id);
       await tx.driverDocument.updateMany({
-        where: { verificationId: v.id, submissionNumber: null },
+        where: { id: { in: currentIds } },
         data: { submissionNumber: nextNumber },
       });
       await this.outbox.enqueue(
@@ -335,6 +359,11 @@ export class OnboardingService {
   /** POST /v1/admin/onboarding/:driver_id/approve (§6.3). */
   async approve(driverId: string, adminId: string, input: ApproveInput): Promise<StatusView> {
     const v = await this.getExisting(driverId);
+    // §7 decision idempotency: re-approving the SAME current submission returns the
+    // status view with no second audit row and no duplicate event/notification.
+    if (v.status === VerificationStatus.APPROVED && v.submissionNumber === input.submissionNumber) {
+      return this.getStatus(driverId);
+    }
     this.assertReviewable(v, input.submissionNumber);
     if (!input.licenseExpiresOn || !input.registrationExpiresOn) {
       throw AuthError.missingExpiry();

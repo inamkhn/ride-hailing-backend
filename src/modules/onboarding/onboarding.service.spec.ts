@@ -61,6 +61,7 @@ describe('OnboardingService', () => {
   let storage: any;
   let outbox: any;
   let events: any;
+  let rateLimiter: any;
   let tx: any;
   let service: OnboardingService;
 
@@ -97,7 +98,8 @@ describe('OnboardingService', () => {
     };
     outbox = { enqueue: jest.fn(async () => ({})) };
     events = { emitDriverVerificationChanged: jest.fn(), emitProfileVehicleChanged: jest.fn() };
-    service = new OnboardingService(prisma, storage, outbox, events);
+    rateLimiter = { consume: jest.fn(async () => ({ allowed: true })) };
+    service = new OnboardingService(prisma, storage, outbox, events, rateLimiter);
   });
 
   // ----------------------------------------------------------- capability
@@ -278,7 +280,11 @@ describe('OnboardingService', () => {
         expect.objectContaining({ data: expect.objectContaining({ submissionNumber: 1, status: VerificationStatus.PENDING }) }),
       );
       expect(tx.driverDocument.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ submissionNumber: null }) }),
+        // #1 fix: stamp the CURRENT doc set by id (not just null drafts) with the new number.
+        expect.objectContaining({
+          where: { id: { in: expect.arrayContaining(['doc-LICENSE', 'doc-VEHICLE_REGISTRATION', 'doc-BACKGROUND_CHECK']) } },
+          data: { submissionNumber: 1 },
+        }),
       );
       expect(outbox.enqueue).toHaveBeenCalledWith('driver.onboarding.submitted', expect.objectContaining({ submissionNumber: 1 }), tx);
       expect(view.submitted).toBe(true);
@@ -340,6 +346,19 @@ describe('OnboardingService', () => {
       expect(events.emitDriverVerificationChanged).toHaveBeenCalledWith(
         expect.objectContaining({ to: VerificationStatus.APPROVED }),
       );
+    });
+
+    it('is idempotent: re-approving the same current submission writes no audit/emit (§7)', async () => {
+      // status APPROVED + matching submission_number -> short-circuit before any write.
+      mockVerification(
+        makeVerification({ status: VerificationStatus.APPROVED, submittedAt: new Date(), submissionNumber: 1 }),
+      );
+      const view = await service.approve('d-1', 'admin-1', input);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(tx.adminAuditLog.create).not.toHaveBeenCalled();
+      expect(outbox.enqueue).not.toHaveBeenCalled();
+      expect(events.emitDriverVerificationChanged).not.toHaveBeenCalled();
+      expect(view.status).toBe(VerificationStatus.APPROVED);
     });
   });
 
@@ -404,6 +423,31 @@ describe('OnboardingService', () => {
       await service.onVehicleChanged({ driverId: 'd-1' });
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(events.emitDriverVerificationChanged).not.toHaveBeenCalled();
+    });
+  });
+
+  // ------------------------------------------------------- per-driver limits
+
+  describe('rate limits (§10)', () => {
+    it('429 on upload-url once the driver budget is exhausted', async () => {
+      rateLimiter.consume.mockResolvedValue({ allowed: false, retryAfterSeconds: 120 });
+      await expect(
+        service.requestUploadUrl('d-1', DocumentType.LICENSE, 'image/jpeg', 1000),
+      ).rejects.toMatchObject({ code: AuthErrorCode.RATE_LIMITED, retryAfterSeconds: 120 });
+      // Never reaches storage / state when throttled.
+      expect(storage.presignPut).not.toHaveBeenCalled();
+    });
+
+    it('429 on submit once the driver budget is exhausted', async () => {
+      rateLimiter.consume.mockResolvedValue({ allowed: false, retryAfterSeconds: 30 });
+      await expect(service.submit('d-1')).rejects.toMatchObject({ code: AuthErrorCode.RATE_LIMITED });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('keys the bucket by driver id so one driver cannot exhaust another budget', async () => {
+      mockVerification(makeVerification());
+      await service.requestUploadUrl('d-1', DocumentType.LICENSE, 'image/jpeg', 1000);
+      expect(rateLimiter.consume).toHaveBeenCalledWith(expect.stringContaining(':d-1'), expect.any(Number), expect.any(Number));
     });
   });
 
